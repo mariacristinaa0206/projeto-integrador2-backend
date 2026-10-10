@@ -1,0 +1,519 @@
+// Modelo do banco (PostgreSQL / Neon) do ConectaMente, a partir do diagrama do projeto (TB_USUARIO, TB_ALUNO,
+// TB_REGISTRO_EMOCIONAL, TB_CONTEUDO_EDUCATIVO, TB_ACOMPANHAMENTO, TB_NOTIFICACAO, TB_RELATORIO) mais as tabelas
+// que os requisitos exigem (vínculos, alertas, sessões, conversas, mensagens, feedbacks, metas e auditoria).
+// Modelos em português; no banco, tabelas e colunas ficam em snake_case português via @@map/@map.
+// A URL de conexão NÃO fica aqui: no Prisma 7 ela é definida em prisma.config.js (DATABASE_URL).
+//
+// DATAS E HORAS: todas as colunas DateTime são `timestamp` SEM fuso e guardam o relógio em UTC. É de propósito.
+// Com `timestamptz`, o adaptador `pg` do Prisma envia o valor sem fuso e o Postgres o interpreta no fuso da
+// SESSÃO: num servidor que não esteja em UTC (ex.: um Postgres local no Brasil) tudo era gravado deslocado (3 h),
+// sem que a API percebesse, mas com o histórico e a auditoria errados para qualquer outra ferramenta. Em `timestamp`
+// o valor entra e sai literalmente, qualquer que seja o fuso do servidor, do pooler ou da sessão.
+// Não troque para @db.Timestamptz(3) sem revisar isso.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ------------------------------------------------------------------------------------------ enums
+
+enum PapelUsuario {
+  aluno
+  professor
+  pedagogico
+  psicologo
+  administrador
+
+  @@map("papel_usuario")
+}
+
+enum NivelEnsino {
+  infantil
+  fundamental
+  medio
+  aee
+
+  @@map("nivel_ensino")
+}
+
+enum OrigemConsentimento {
+  titular // o próprio aluno aceitou os termos
+  responsavel // a escola registrou o consentimento do pai/mãe/responsável
+
+  @@map("origem_consentimento")
+}
+
+enum Emocao {
+  muito_feliz
+  feliz
+  calmo
+  neutro
+  irritado
+  com_medo
+  ansioso
+  estressado
+  triste
+  muito_triste
+
+  @@map("emocao")
+}
+
+enum Intensidade {
+  baixa
+  media
+  alta
+
+  @@map("intensidade")
+}
+
+enum TipoConteudo {
+  artigo
+  video
+  audio
+  atividade
+  quiz
+  orientacao
+
+  @@map("tipo_conteudo")
+}
+
+enum TemaConteudo {
+  ansiedade
+  estresse
+  tristeza
+  autoestima
+  empatia
+  autocuidado
+  habilidades_socioemocionais
+
+  @@map("tema_conteudo")
+}
+
+enum TipoAcompanhamento {
+  pedagogico
+  psicologico
+
+  @@map("tipo_acompanhamento")
+}
+
+enum StatusVinculo {
+  ativo
+  encerrado
+
+  @@map("status_vinculo")
+}
+
+enum OrigemVinculo {
+  agendamento // o aluno compartilhou os registros ao marcar a sessão
+  alerta // o psicólogo assumiu um alerta
+  designacao // a escola designou o psicólogo
+
+  @@map("origem_vinculo")
+}
+
+enum TipoAlerta {
+  sequencia_negativa
+  intensidade_alta_recorrente
+  queda_de_humor
+
+  @@map("tipo_alerta")
+}
+
+enum StatusAlerta {
+  aberto
+  em_acompanhamento
+  resolvido
+
+  @@map("status_alerta")
+}
+
+enum StatusSessao {
+  solicitada
+  confirmada
+  recusada
+  cancelada
+  concluida
+
+  @@map("status_sessao")
+}
+
+enum AlvoFeedback {
+  sistema
+  sessao
+
+  @@map("alvo_feedback")
+}
+
+enum CategoriaMeta {
+  reducao_estresse
+  autocuidado
+  sono
+  atividade_fisica
+  socializacao
+  estudos
+  outra
+
+  @@map("categoria_meta")
+}
+
+enum StatusMeta {
+  em_andamento
+  concluida
+  abandonada
+
+  @@map("status_meta")
+}
+
+enum TipoRelatorio {
+  emocional
+  pedagogico
+  estatistico
+
+  @@map("tipo_relatorio")
+}
+
+enum TipoNotificacao {
+  alerta_acompanhamento
+  sessao_solicitada
+  sessao_confirmada
+  sessao_recusada
+  sessao_cancelada
+  acompanhamento_iniciado
+
+  @@map("tipo_notificacao")
+}
+
+// ------------------------------------------------------------------------------------------ pessoas
+
+// TB_USUARIO. Uma única tabela para todos os perfis: o e-mail é único no sistema e o login não pergunta o perfil.
+model Usuario {
+  id              Int          @id @default(autoincrement())
+  nome            String       @db.VarChar(100)
+  email           String       @unique @db.VarChar(254)
+  senhaHash       String       @map("senha_hash") @db.VarChar(100)
+  papel           PapelUsuario
+  ativo           Boolean      @default(true)
+  // Senha provisória (conta criada pela escola ou senha redefinida): a pessoa só consegue trocar a senha.
+  deveTrocarSenha Boolean      @default(false) @map("deve_trocar_senha")
+  // Incrementado em logout, troca de senha e desativação: invalida todos os JWTs emitidos antes.
+  versaoToken     Int          @default(0) @map("versao_token")
+  ultimoAcessoEm  DateTime?    @map("ultimo_acesso_em")
+  criadoEm        DateTime     @default(now()) @map("criado_em")
+  atualizadoEm    DateTime     @default(now()) @updatedAt @map("atualizado_em")
+
+  aluno                      Aluno?              @relation("PerfilAluno")
+  consentimentosRegistrados  Aluno[]             @relation("ConsentimentoRegistradoPor")
+  registros                  RegistroEmocional[]
+  conteudosCriados           ConteudoEducativo[]
+  acompanhamentosRecebidos   Acompanhamento[]    @relation("AcompanhamentoDoAluno")
+  acompanhamentosEscritos    Acompanhamento[]    @relation("AcompanhamentoDoAutor")
+  notificacoes               Notificacao[]
+  relatoriosDoUsuario        Relatorio[]         @relation("RelatorioDoUsuario")
+  relatoriosGerados          Relatorio[]         @relation("RelatorioGeradoPor")
+  vinculosComoAluno          Vinculo[]           @relation("VinculoAluno")
+  vinculosComoProfissional   Vinculo[]           @relation("VinculoProfissional")
+  vinculosCriados            Vinculo[]           @relation("VinculoCriadoPor")
+  alertasComoAluno           Alerta[]            @relation("AlertaAluno")
+  alertasSobResponsabilidade Alerta[]            @relation("AlertaResponsavel")
+  alertasResolvidos          Alerta[]            @relation("AlertaResolvidoPor")
+  sessoesComoAluno           Sessao[]            @relation("SessaoAluno")
+  sessoesComoProfissional    Sessao[]            @relation("SessaoProfissional")
+  conversasComoAluno         Conversa[]          @relation("ConversaAluno")
+  conversasComoProfissional  Conversa[]          @relation("ConversaProfissional")
+  mensagens                  Mensagem[]
+  feedbacks                  Feedback[]
+  metas                      Meta[]
+
+  @@index([papel, ativo], map: "usuarios_papel_ativo_idx")
+  @@map("usuarios")
+}
+
+// TB_ALUNO. Perfil do aluno (1:1 com o usuário). Registra também de QUEM veio o consentimento para o tratamento
+// dos dados (LGPD): o próprio aluno (autocadastro) ou o responsável (cadastro feito pela escola).
+model Aluno {
+  id                         Int                 @id @default(autoincrement())
+  usuarioId                  Int                 @unique @map("usuario_id")
+  turma                      String              @db.VarChar(50)
+  nivelEnsino                NivelEnsino         @map("nivel_ensino")
+  consentimentoEm            DateTime            @map("consentimento_em")
+  consentimentoOrigem        OrigemConsentimento @map("consentimento_origem")
+  consentimentoRegistradoPor Int?                @map("consentimento_registrado_por")
+
+  usuario     Usuario  @relation("PerfilAluno", fields: [usuarioId], references: [id], onDelete: Cascade)
+  registrador Usuario? @relation("ConsentimentoRegistradoPor", fields: [consentimentoRegistradoPor], references: [id], onDelete: SetNull)
+
+  @@index([turma], map: "alunos_turma_idx")
+  @@index([nivelEnsino], map: "alunos_nivel_ensino_idx")
+  @@map("alunos")
+}
+
+// ------------------------------------------------------------------------------------------ emoções
+
+// TB_REGISTRO_EMOCIONAL. A observação é texto livre (pode ser íntima): fica CIFRADA (AES-256-GCM). Emoção e
+// intensidade ficam em claro porque os indicadores e alertas precisam agregá-las no banco. `dia` é a data
+// local (Brasília) em que o registro foi feito: é por ela que se agrupa, nunca pelo horário UTC.
+model RegistroEmocional {
+  id           Int         @id @default(autoincrement())
+  usuarioId    Int         @map("usuario_id")
+  emocao       Emocao
+  intensidade  Intensidade
+  observacao   String? // cifrada
+  dia          DateTime    @db.Date
+  registradoEm DateTime    @default(now()) @map("registrado_em")
+  atualizadoEm DateTime    @default(now()) @updatedAt @map("atualizado_em")
+
+  usuario Usuario @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
+
+  @@index([usuarioId, dia], map: "registros_usuario_dia_idx")
+  @@index([dia, emocao], map: "registros_dia_emocao_idx")
+  @@map("registros_emocionais")
+}
+
+// ------------------------------------------------------------------------------------------ conteúdos
+
+// TB_CONTEUDO_EDUCATIVO. Inclui as orientações iniciais (tipo "orientacao") e os quizzes (estrutura em JSON).
+// `niveisEnsino` vazio = serve para todos os níveis. Os textos são públicos para quem tem acesso ao sistema.
+model ConteudoEducativo {
+  id             Int           @id @default(autoincrement())
+  titulo         String        @db.VarChar(150)
+  descricao      String // texto completo (DS_CONTEUDO)
+  tipo           TipoConteudo
+  tema           TemaConteudo
+  niveisEnsino   NivelEnsino[] @map("niveis_ensino")
+  urlMidia       String?       @map("url_midia") @db.VarChar(500)
+  estrutura      Json? // só quiz: { perguntas: [{ enunciado, opcoes, correta, explicacao? }] }
+  publicado      Boolean       @default(true)
+  dataPublicacao DateTime      @map("data_publicacao") @db.Date
+  criadoPor      Int?          @map("criado_por")
+  criadoEm       DateTime      @default(now()) @map("criado_em")
+  atualizadoEm   DateTime      @default(now()) @updatedAt @map("atualizado_em")
+
+  autor Usuario? @relation(fields: [criadoPor], references: [id], onDelete: SetNull)
+
+  @@index([publicado, tipo, tema], map: "conteudos_publicado_tipo_tema_idx")
+  @@map("conteudos_educativos")
+}
+
+// ------------------------------------------------------------------------------------------ equipe
+
+// TB_ACOMPANHAMENTO. Anotações da equipe sobre um aluno. Imutáveis (histórico) e CIFRADAS.
+// `tipo` guarda o papel do autor na hora (quem pode ler depende dele: ver acompanhamento.servico.js).
+model Acompanhamento {
+  id         Int                @id @default(autoincrement())
+  usuarioId  Int                @map("usuario_id")
+  autorId    Int?               @map("autor_id")
+  tipo       TipoAcompanhamento
+  observacao String // cifrada
+  data       DateTime           @db.Date
+  criadoEm   DateTime           @default(now()) @map("criado_em")
+
+  aluno Usuario  @relation("AcompanhamentoDoAluno", fields: [usuarioId], references: [id], onDelete: Cascade)
+  autor Usuario? @relation("AcompanhamentoDoAutor", fields: [autorId], references: [id], onDelete: SetNull)
+
+  @@index([usuarioId, data], map: "acompanhamentos_usuario_data_idx")
+  @@map("acompanhamentos")
+}
+
+// Acesso do psicólogo aos registros emocionais de UM aluno. Sem vínculo ativo o psicólogo não vê nada do diário.
+// Nunca é apagado: encerrar muda o status (o histórico de quem teve acesso fica).
+model Vinculo {
+  id             Int           @id @default(autoincrement())
+  alunoId        Int           @map("aluno_id")
+  profissionalId Int           @map("profissional_id")
+  origem         OrigemVinculo
+  status         StatusVinculo @default(ativo)
+  criadoPor      Int?          @map("criado_por")
+  criadoEm       DateTime      @default(now()) @map("criado_em")
+  atualizadoEm   DateTime      @default(now()) @updatedAt @map("atualizado_em")
+  encerradoEm    DateTime?     @map("encerrado_em")
+
+  aluno        Usuario  @relation("VinculoAluno", fields: [alunoId], references: [id], onDelete: Cascade)
+  profissional Usuario  @relation("VinculoProfissional", fields: [profissionalId], references: [id], onDelete: Cascade)
+  autor        Usuario? @relation("VinculoCriadoPor", fields: [criadoPor], references: [id], onDelete: SetNull)
+
+  @@unique([alunoId, profissionalId], map: "vinculos_aluno_profissional_key")
+  @@index([profissionalId, status], map: "vinculos_profissional_status_idx")
+  @@index([alunoId, status], map: "vinculos_aluno_status_idx")
+  @@map("vinculos")
+}
+
+// Sinal gerado quando os registros do aluno seguem um padrão que merece atenção. Nunca existem dois alertas "vivos"
+// (abertos ou em acompanhamento) do mesmo tipo para o mesmo aluno: um índice único parcial, escrito à mão na
+// migração, impede repetir enquanto o anterior não for resolvido.
+model Alerta {
+  id            Int          @id @default(autoincrement())
+  alunoId       Int          @map("aluno_id")
+  tipo          TipoAlerta
+  status        StatusAlerta @default(aberto)
+  responsavelId Int?         @map("responsavel_id")
+  resolvidoPor  Int?         @map("resolvido_por")
+  criadoEm      DateTime     @default(now()) @map("criado_em")
+  assumidoEm    DateTime?    @map("assumido_em")
+  resolvidoEm   DateTime?    @map("resolvido_em")
+  atualizadoEm  DateTime     @default(now()) @updatedAt @map("atualizado_em")
+
+  aluno       Usuario  @relation("AlertaAluno", fields: [alunoId], references: [id], onDelete: Cascade)
+  responsavel Usuario? @relation("AlertaResponsavel", fields: [responsavelId], references: [id], onDelete: SetNull)
+  resolvedor  Usuario? @relation("AlertaResolvidoPor", fields: [resolvidoPor], references: [id], onDelete: SetNull)
+
+  @@index([status, criadoEm], map: "alertas_status_criado_em_idx")
+  @@index([alunoId, status], map: "alertas_aluno_status_idx")
+  @@map("alertas")
+}
+
+// ------------------------------------------------------------------------------------------ sessões e chat
+
+// RF06. Sessão de 30 min com um profissional de apoio. O motivo é texto do aluno e fica CIFRADO.
+// Índices únicos parciais (na migração) impedem dois agendamentos vivos no mesmo horário, do profissional e do aluno.
+model Sessao {
+  id             Int          @id @default(autoincrement())
+  alunoId        Int          @map("aluno_id")
+  profissionalId Int          @map("profissional_id")
+  inicio         DateTime
+  status         StatusSessao @default(solicitada)
+  motivo         String? // cifrado
+  criadoEm       DateTime     @default(now()) @map("criado_em")
+  atualizadoEm   DateTime     @default(now()) @updatedAt @map("atualizado_em")
+
+  aluno        Usuario   @relation("SessaoAluno", fields: [alunoId], references: [id], onDelete: Cascade)
+  profissional Usuario   @relation("SessaoProfissional", fields: [profissionalId], references: [id], onDelete: Cascade)
+  feedback     Feedback?
+
+  @@index([alunoId, inicio], map: "sessoes_aluno_inicio_idx")
+  @@index([profissionalId, inicio], map: "sessoes_profissional_inicio_idx")
+  @@map("sessoes")
+}
+
+// RF07. Uma conversa por par aluno × profissional de apoio.
+model Conversa {
+  id               Int       @id @default(autoincrement())
+  alunoId          Int       @map("aluno_id")
+  profissionalId   Int       @map("profissional_id")
+  criadaEm         DateTime  @default(now()) @map("criada_em")
+  ultimaMensagemEm DateTime? @map("ultima_mensagem_em")
+
+  aluno        Usuario    @relation("ConversaAluno", fields: [alunoId], references: [id], onDelete: Cascade)
+  profissional Usuario    @relation("ConversaProfissional", fields: [profissionalId], references: [id], onDelete: Cascade)
+  mensagens    Mensagem[]
+
+  @@unique([alunoId, profissionalId], map: "conversas_aluno_profissional_key")
+  @@index([profissionalId], map: "conversas_profissional_idx")
+  @@map("conversas")
+}
+
+model Mensagem {
+  id         Int       @id @default(autoincrement())
+  conversaId Int       @map("conversa_id")
+  autorId    Int       @map("autor_id")
+  texto      String // cifrado
+  enviadaEm  DateTime  @default(now()) @map("enviada_em")
+  lidaEm     DateTime? @map("lida_em")
+
+  conversa Conversa @relation(fields: [conversaId], references: [id], onDelete: Cascade)
+  autor    Usuario  @relation(fields: [autorId], references: [id], onDelete: Cascade)
+
+  @@index([conversaId, id], map: "mensagens_conversa_id_idx")
+  @@map("mensagens")
+}
+
+// ------------------------------------------------------------------------------------------ bem-estar
+
+// RF08. A nota é de 1 a 5. Nenhuma tela de gestão mostra QUEM avaliou (só a nota, o alvo e o comentário).
+model Feedback {
+  id         Int          @id @default(autoincrement())
+  usuarioId  Int          @map("usuario_id")
+  alvo       AlvoFeedback
+  sessaoId   Int?         @unique @map("sessao_id")
+  nota       Int          @db.SmallInt
+  comentario String? // cifrado
+  criadoEm   DateTime     @default(now()) @map("criado_em")
+
+  usuario Usuario @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
+  sessao  Sessao? @relation(fields: [sessaoId], references: [id], onDelete: Cascade)
+
+  @@index([alvo, criadoEm], map: "feedbacks_alvo_criado_em_idx")
+  @@index([usuarioId], map: "feedbacks_usuario_idx")
+  @@map("feedbacks")
+}
+
+// RF10. Meta pessoal de saúde mental. O título é íntimo: CIFRADO. Só o dono enxerga.
+model Meta {
+  id           Int           @id @default(autoincrement())
+  usuarioId    Int           @map("usuario_id")
+  titulo       String // cifrado
+  categoria    CategoriaMeta
+  prazo        DateTime?     @db.Date
+  status       StatusMeta    @default(em_andamento)
+  concluidaEm  DateTime?     @map("concluida_em")
+  criadoEm     DateTime      @default(now()) @map("criado_em")
+  atualizadoEm DateTime      @default(now()) @updatedAt @map("atualizado_em")
+
+  usuario Usuario @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
+
+  @@index([usuarioId, status], map: "metas_usuario_status_idx")
+  @@map("metas")
+}
+
+// ------------------------------------------------------------------------------------------ comunicação e relatórios
+
+// TB_NOTIFICACAO. A mensagem é GENÉRICA de propósito (nunca traz emoção, nome de aluno ou texto de conversa):
+// ela só avisa que há algo a ver, e `referenciaId` aponta o quê.
+model Notificacao {
+  id           Int             @id @default(autoincrement())
+  usuarioId    Int             @map("usuario_id")
+  tipo         TipoNotificacao
+  mensagem     String          @db.VarChar(255)
+  referenciaId Int?            @map("referencia_id")
+  enviadaEm    DateTime        @default(now()) @map("enviada_em")
+  lida         Boolean         @default(false)
+
+  usuario Usuario @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
+
+  @@index([usuarioId, lida, enviadaEm], map: "notificacoes_usuario_lida_enviada_idx")
+  @@map("notificacoes")
+}
+
+// TB_RELATORIO. Instantâneo de um relatório gerado: os números ficam em `dados` (JSON CIFRADO, mesmo os coletivos,
+// por simplicidade). `usuarioId` só existe no relatório emocional (de quem é).
+model Relatorio {
+  id            Int           @id @default(autoincrement())
+  tipo          TipoRelatorio
+  usuarioId     Int?          @map("usuario_id")
+  geradoPor     Int?          @map("gerado_por")
+  periodoInicio DateTime      @map("periodo_inicio") @db.Date
+  periodoFim    DateTime      @map("periodo_fim") @db.Date
+  descricao     String? // resumo curto, sem dado pessoal
+  dados         String // JSON cifrado
+  geradoEm      DateTime      @default(now()) @map("gerado_em")
+
+  usuario Usuario? @relation("RelatorioDoUsuario", fields: [usuarioId], references: [id], onDelete: Cascade)
+  autor   Usuario? @relation("RelatorioGeradoPor", fields: [geradoPor], references: [id], onDelete: SetNull)
+
+  @@index([tipo, geradoEm], map: "relatorios_tipo_gerado_em_idx")
+  @@index([usuarioId, geradoEm], map: "relatorios_usuario_gerado_em_idx")
+  @@map("relatorios")
+}
+
+// RNF10. Trilha de auditoria: quem fez o quê e sobre quem. NÃO tem chave estrangeira de propósito: o histórico
+// precisa sobreviver à exclusão da conta. Nunca guarda conteúdo (texto de registro, mensagem, anotação).
+model LogAuditoria {
+  id            Int      @id @default(autoincrement())
+  usuarioId     Int?     @map("usuario_id")
+  alvoUsuarioId Int?     @map("alvo_usuario_id")
+  acao          String   @db.VarChar(60)
+  recurso       String?  @db.VarChar(40)
+  recursoId     Int?     @map("recurso_id")
+  idRequisicao  String?  @map("id_requisicao") @db.VarChar(36)
+  detalhes      Json?
+  criadoEm      DateTime @default(now()) @map("criado_em")
+
+  @@index([criadoEm], map: "logs_auditoria_criado_em_idx")
+  @@index([usuarioId, criadoEm], map: "logs_auditoria_usuario_criado_em_idx")
+  @@index([alvoUsuarioId, criadoEm], map: "logs_auditoria_alvo_criado_em_idx")
+  @@index([acao, criadoEm], map: "logs_auditoria_acao_criado_em_idx")
+  @@map("logs_auditoria")
+}
